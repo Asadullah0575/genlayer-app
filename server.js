@@ -1,7 +1,11 @@
+require('dotenv').config({ path: require('path').resolve(__dirname, '.env') });
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const mongoose = require('mongoose');
+const jwt = require('jsonwebtoken');
+const { ethers } = require('ethers');
 const Anthropic = require('@anthropic-ai/sdk');
 
 const app = express();
@@ -14,149 +18,241 @@ const io = new Server(server, {
   },
 });
 
-app.use(cors());
+app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:5173' }));
 app.use(express.json());
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-// In-memory store (replace with DB later)
-const rooms = {
-  general:  { name: 'general',  desc: 'Open discussion',         messages: [] },
-  research: { name: 'research', desc: 'AI-assisted research',    messages: [] },
-  design:   { name: 'design',   desc: 'UI/UX collaboration',     messages: [] },
-  backend:  { name: 'backend',  desc: 'API & infrastructure',    messages: [] },
-  deploy:   { name: 'deploy',   desc: 'DevOps & CI/CD',          messages: [] },
+// ─── MongoDB Connection ───────────────────────────────────────────────────────
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => console.log('✅ MongoDB connected'))
+  .catch(err => console.error('❌ MongoDB error:', err));
+
+// ─── Schemas ──────────────────────────────────────────────────────────────────
+const UserSchema = new mongoose.Schema({
+  address: { type: String, required: true, unique: true, lowercase: true },
+  username: { type: String, required: true },
+  nonce: { type: String, default: () => Math.floor(Math.random() * 1000000).toString() },
+  createdAt: { type: Date, default: Date.now },
+});
+
+const MessageSchema = new mongoose.Schema({
+  room: { type: String, required: true },
+  username: { type: String, required: true },
+  address: { type: String },
+  text: { type: String, required: true },
+  type: { type: String, enum: ['user', 'ai', 'system'], default: 'user' },
+  ts: { type: Date, default: Date.now },
+});
+
+MessageSchema.index({ room: 1, ts: -1 });
+
+const User = mongoose.model('User', UserSchema);
+const Message = mongoose.model('Message', MessageSchema);
+
+// ─── Auth Middleware ──────────────────────────────────────────────────────────
+const authMiddleware = (req, res, next) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'No token provided' });
+  try {
+    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    next();
+  } catch {
+    res.status(401).json({ error: 'Invalid token' });
+  }
 };
 
-// Track connected users: socketId -> { username, room }
-const connectedUsers = {};
+// ─── REST: Auth Routes ────────────────────────────────────────────────────────
 
-// ─── REST: health check ───────────────────────────────────────────────────────
-app.get('/health', (_, res) => res.json({ status: 'ok', rooms: Object.keys(rooms) }));
+// Step 1: Get nonce for wallet to sign
+app.get('/auth/nonce/:address', async (req, res) => {
+  try {
+    const address = req.params.address.toLowerCase();
+    let user = await User.findOne({ address });
+
+    if (!user) {
+      // New user — return nonce but don't save yet
+      const nonce = Math.floor(Math.random() * 1000000).toString();
+      return res.json({ nonce, isNew: true });
+    }
+
+    // Refresh nonce
+    user.nonce = Math.floor(Math.random() * 1000000).toString();
+    await user.save();
+    res.json({ nonce: user.nonce, isNew: false, username: user.username });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Step 2: Verify signature and issue JWT
+app.post('/auth/verify', async (req, res) => {
+  try {
+    const { address, signature, nonce, username } = req.body;
+    if (!address || !signature || !nonce) {
+      return res.status(400).json({ error: 'Missing fields' });
+    }
+
+    // Recover signer from signature
+    const message = `Welcome to GenLayer!\n\nSign this message to verify your wallet.\n\nNonce: ${nonce}`;
+    const recoveredAddress = ethers.verifyMessage(message, signature);
+
+    if (recoveredAddress.toLowerCase() !== address.toLowerCase()) {
+      return res.status(401).json({ error: 'Signature mismatch' });
+    }
+
+    let user = await User.findOne({ address: address.toLowerCase() });
+
+    if (!user) {
+      if (!username) return res.status(400).json({ error: 'Username required for new users' });
+      user = await User.create({ address: address.toLowerCase(), username, nonce });
+    }
+
+    // Refresh nonce after use
+    user.nonce = Math.floor(Math.random() * 1000000).toString();
+    await user.save();
+
+    const token = jwt.sign(
+      { address: user.address, username: user.username, id: user._id },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    res.json({ token, username: user.username, address: user.address });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── REST: Messages ───────────────────────────────────────────────────────────
+app.get('/messages/:room', authMiddleware, async (req, res) => {
+  try {
+    const messages = await Message.find({ room: req.params.room })
+      .sort({ ts: 1 })
+      .limit(50);
+    res.json(messages);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── REST: Health ─────────────────────────────────────────────────────────────
+app.get('/health', (_, res) => res.json({ status: 'ok' }));
+
+// ─── Socket.IO Auth Middleware ────────────────────────────────────────────────
+io.use((socket, next) => {
+  const token = socket.handshake.auth.token;
+  if (!token) return next(new Error('Authentication required'));
+  try {
+    socket.user = jwt.verify(token, process.env.JWT_SECRET);
+    next();
+  } catch {
+    next(new Error('Invalid token'));
+  }
+});
 
 // ─── Socket.IO ────────────────────────────────────────────────────────────────
+const connectedUsers = {};
+
+const ROOMS = ['general', 'research', 'design', 'backend', 'deploy'];
+const ROOM_DESCS = {
+  general: 'Open discussion',
+  research: 'AI-assisted research',
+  design: 'UI/UX collaboration',
+  backend: 'API & infrastructure',
+  deploy: 'DevOps & CI/CD',
+};
+
 io.on('connection', (socket) => {
-  console.log(`[+] Socket connected: ${socket.id}`);
+  const { username, address } = socket.user;
+  console.log(`[+] ${username} (${address?.slice(0, 8)}…) connected`);
 
-  // JOIN ROOM
-  socket.on('join_room', ({ username, room }) => {
-    if (!rooms[room]) return socket.emit('error', { message: 'Room not found' });
+  socket.on('join_room', async ({ room }) => {
+    if (!ROOMS.includes(room)) return;
 
-    // Leave previous room if any
     const prev = connectedUsers[socket.id];
     if (prev?.room) {
       socket.leave(prev.room);
-      io.to(prev.room).emit('user_left', { username: prev.username, room: prev.room });
+      io.to(prev.room).emit('user_left', { username, room: prev.room });
+      broadcastUserList(prev.room);
     }
 
-    connectedUsers[socket.id] = { username, room };
+    connectedUsers[socket.id] = { username, address, room };
     socket.join(room);
 
-    // Send message history
-    socket.emit('room_history', { room, messages: rooms[room].messages.slice(-50) });
+    // Load history from MongoDB
+    const messages = await Message.find({ room }).sort({ ts: 1 }).limit(50);
+    socket.emit('room_history', { room, messages });
 
-    // Notify room
     io.to(room).emit('user_joined', { username, room });
-
-    // Send updated user list
     broadcastUserList(room);
-    console.log(`[→] ${username} joined #${room}`);
   });
 
-  // SEND MESSAGE
-  socket.on('send_message', async ({ room, text, username }) => {
-    if (!rooms[room] || !text?.trim()) return;
+  socket.on('send_message', async ({ room, text }) => {
+    if (!ROOMS.includes(room) || !text?.trim()) return;
 
-    const msg = {
-      id: Date.now(),
-      username,
-      text: text.trim(),
-      ts: new Date().toISOString(),
-      type: 'user',
-    };
+    const msg = await Message.create({
+      room, username, address, text: text.trim(), type: 'user',
+    });
 
-    rooms[room].messages.push(msg);
     io.to(room).emit('new_message', { room, message: msg });
 
-    // Trigger AI if message starts with @ai or @genlayer
     const aiTrigger = /^@(ai|genlayer)\s+/i.test(text.trim());
     const alwaysAI = process.env.AI_ALWAYS === 'true';
 
     if (aiTrigger || alwaysAI) {
-      // Show typing indicator
       io.to(room).emit('ai_typing', { room, typing: true });
 
       try {
-        const history = rooms[room].messages
-          .slice(-8)
-          .filter(m => m.id !== msg.id)
-          .map(m => ({
-            role: m.type === 'ai' ? 'assistant' : 'user',
-            content: `${m.type !== 'ai' ? m.username + ': ' : ''}${m.text}`,
-          }));
-
+        const history = await Message.find({ room }).sort({ ts: -1 }).limit(8);
         const cleanText = text.replace(/^@(ai|genlayer)\s+/i, '');
 
         const response = await anthropic.messages.create({
           model: 'claude-sonnet-4-20250514',
           max_tokens: 1000,
-          system: `You are GenLayer AI, an intelligent assistant in the collaborative room "#${room}" (${rooms[room].desc}). Help the team build a GenLayer-powered application. Be concise and technical. Keep responses under 150 words.`,
+          system: `You are GenLayer AI in "#${room}" (${ROOM_DESCS[room]}). Help the team build a GenLayer-powered app. Be concise and technical. Under 150 words.`,
           messages: [
-            ...history,
+            ...history.reverse().map(m => ({
+              role: m.type === 'ai' ? 'assistant' : 'user',
+              content: `${m.type !== 'ai' ? m.username + ': ' : ''}${m.text}`,
+            })),
             { role: 'user', content: `${username}: ${cleanText}` },
           ],
         });
 
         const aiText = response.content.map(b => b.text || '').join('');
-        const aiMsg = {
-          id: Date.now() + 1,
-          username: 'GenLayer AI',
-          text: aiText,
-          ts: new Date().toISOString(),
-          type: 'ai',
-        };
+        const aiMsg = await Message.create({
+          room, username: 'GenLayer AI', text: aiText, type: 'ai',
+        });
 
-        rooms[room].messages.push(aiMsg);
         io.to(room).emit('new_message', { room, message: aiMsg });
       } catch (err) {
         console.error('[AI Error]', err.message);
-        io.to(room).emit('new_message', {
-          room,
-          message: {
-            id: Date.now() + 2,
-            username: 'GenLayer AI',
-            text: 'AI service temporarily unavailable.',
-            ts: new Date().toISOString(),
-            type: 'ai',
-          },
-        });
       } finally {
         io.to(room).emit('ai_typing', { room, typing: false });
       }
     }
   });
 
-  // TYPING INDICATOR
-  socket.on('typing', ({ room, username, isTyping }) => {
+  socket.on('typing', ({ room, isTyping }) => {
     socket.to(room).emit('user_typing', { username, isTyping });
   });
 
-  // DISCONNECT
   socket.on('disconnect', () => {
     const user = connectedUsers[socket.id];
     if (user) {
-      io.to(user.room).emit('user_left', { username: user.username, room: user.room });
+      io.to(user.room).emit('user_left', { username, room: user.room });
       broadcastUserList(user.room);
       delete connectedUsers[socket.id];
     }
-    console.log(`[-] Socket disconnected: ${socket.id}`);
+    console.log(`[-] ${username} disconnected`);
   });
 });
 
 function broadcastUserList(room) {
   const users = Object.values(connectedUsers)
     .filter(u => u.room === room)
-    .map(u => u.username);
+    .map(u => ({ username: u.username, address: u.address }));
   io.to(room).emit('room_users', { room, users });
 }
 
