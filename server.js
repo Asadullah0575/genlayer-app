@@ -8,22 +8,42 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const { ethers } = require('ethers');
 const crypto = require('crypto');
+const multer = require('multer');
+const { createClient } = require('@supabase/supabase-js');
+const webpush = require('web-push');
 const Anthropic = require('@anthropic-ai/sdk');
 
 const app = express();
 const server = http.createServer(app);
 
 const io = new Server(server, {
-  cors: {
-    origin: process.env.FRONTEND_URL || 'http://localhost:5173',
-    methods: ['GET', 'POST'],
-  },
+  cors: { origin: process.env.FRONTEND_URL || 'http://localhost:5173', methods: ['GET', 'POST'] },
 });
 
 app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:5173' }));
 app.use(express.json());
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+// ─── Supabase ─────────────────────────────────────────────────────────────────
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+
+// ─── Web Push ─────────────────────────────────────────────────────────────────
+webpush.setVapidDetails(
+  'mailto:' + (process.env.VAPID_EMAIL || 'admin@genlayerchatbox.com'),
+  process.env.VAPID_PUBLIC_KEY,
+  process.env.VAPID_PRIVATE_KEY
+);
+
+// ─── Multer (memory storage — files go to Supabase) ──────────────────────────
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  fileFilter: (_, file, cb) => {
+    const allowed = ['image/jpeg','image/png','image/gif','image/webp','application/pdf','text/plain','application/zip'];
+    cb(null, allowed.includes(file.mimetype));
+  }
+});
 
 // ─── MongoDB ──────────────────────────────────────────────────────────────────
 mongoose.connect(process.env.MONGODB_URI)
@@ -35,6 +55,7 @@ const UserSchema = new mongoose.Schema({
   address: { type: String, required: true, unique: true, lowercase: true },
   username: { type: String, required: true },
   nonce: { type: String, default: () => Math.floor(Math.random() * 1000000).toString() },
+  pushSubscription: { type: Object, default: null },
   createdAt: { type: Date, default: Date.now },
 });
 
@@ -53,8 +74,12 @@ const MessageSchema = new mongoose.Schema({
   room: { type: String, required: true },
   username: { type: String, required: true },
   address: { type: String },
-  text: { type: String, required: true },
+  text: { type: String, default: '' },
   type: { type: String, enum: ['user', 'ai', 'system'], default: 'user' },
+  fileUrl: { type: String, default: null },
+  fileName: { type: String, default: null },
+  fileType: { type: String, default: null },
+  deleted: { type: Boolean, default: false },
   ts: { type: Date, default: Date.now },
 });
 MessageSchema.index({ room: 1, ts: -1 });
@@ -76,10 +101,7 @@ app.get('/auth/nonce/:address', async (req, res) => {
   try {
     const address = req.params.address.toLowerCase();
     let user = await User.findOne({ address });
-    if (!user) {
-      const nonce = Math.floor(Math.random() * 1000000).toString();
-      return res.json({ nonce, isNew: true });
-    }
+    if (!user) return res.json({ nonce: Math.floor(Math.random() * 1000000).toString(), isNew: true });
     user.nonce = Math.floor(Math.random() * 1000000).toString();
     await user.save();
     res.json({ nonce: user.nonce, isNew: false, username: user.username });
@@ -90,7 +112,7 @@ app.post('/auth/verify', async (req, res) => {
   try {
     const { address, signature, nonce, username } = req.body;
     if (!address || !signature || !nonce) return res.status(400).json({ error: 'Missing fields' });
-    const message = `Welcome to GenLayer!\n\nSign this message to verify your wallet.\n\nNonce: ${nonce}`;
+    const message = `Welcome to GenLayer Chat-Box!\n\nSign this message to verify your wallet.\n\nNonce: ${nonce}`;
     const recovered = ethers.verifyMessage(message, signature);
     if (recovered.toLowerCase() !== address.toLowerCase()) return res.status(401).json({ error: 'Signature mismatch' });
     let user = await User.findOne({ address: address.toLowerCase() });
@@ -105,27 +127,57 @@ app.post('/auth/verify', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ─── Private Room Routes ──────────────────────────────────────────────────────
+// ─── Push Notification Routes ─────────────────────────────────────────────────
+app.post('/push/subscribe', authMiddleware, async (req, res) => {
+  try {
+    await User.findOneAndUpdate({ address: req.user.address }, { pushSubscription: req.body });
+    res.json({ status: 'subscribed' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
-// Create a private room
+app.get('/push/vapid-public-key', (_, res) => {
+  res.json({ key: process.env.VAPID_PUBLIC_KEY });
+});
+
+// ─── File Upload Route ────────────────────────────────────────────────────────
+app.post('/upload', authMiddleware, upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file provided' });
+    const ext = req.file.originalname.split('.').pop();
+    const fileName = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${ext}`;
+    const { data, error } = await supabase.storage
+      .from('chat-files')
+      .upload(fileName, req.file.buffer, { contentType: req.file.mimetype });
+    if (error) throw new Error(error.message);
+    const { data: { publicUrl } } = supabase.storage.from('chat-files').getPublicUrl(fileName);
+    res.json({ url: publicUrl, name: req.file.originalname, type: req.file.mimetype });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Room Search ──────────────────────────────────────────────────────────────
+app.get('/rooms/search', authMiddleware, async (req, res) => {
+  try {
+    const q = req.query.q?.trim();
+    if (!q) return res.json([]);
+    const rooms = await PrivateRoom.find({
+      name: { $regex: q, $options: 'i' },
+      'members.address': req.user.address,
+    }).limit(10);
+    res.json(rooms.map(r => ({ id: r._id, name: r.name, description: r.description, memberCount: r.members.length, isCreator: r.creatorAddress === req.user.address })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Private Room Routes ──────────────────────────────────────────────────────
 app.post('/rooms/create', authMiddleware, async (req, res) => {
   try {
     const { name, description } = req.body;
     if (!name?.trim()) return res.status(400).json({ error: 'Room name required' });
     const inviteCode = crypto.randomBytes(8).toString('hex');
-    const room = await PrivateRoom.create({
-      name: name.trim(),
-      description: description?.trim() || '',
-      inviteCode,
-      creatorAddress: req.user.address,
-      creatorUsername: req.user.username,
-      members: [{ address: req.user.address, username: req.user.username }],
-    });
+    const room = await PrivateRoom.create({ name: name.trim(), description: description?.trim() || '', inviteCode, creatorAddress: req.user.address, creatorUsername: req.user.username, members: [{ address: req.user.address, username: req.user.username }] });
     res.json({ room });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Get room info by invite code (public — for join page)
 app.get('/rooms/invite/:code', async (req, res) => {
   try {
     const room = await PrivateRoom.findOne({ inviteCode: req.params.code });
@@ -134,7 +186,6 @@ app.get('/rooms/invite/:code', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Request to join a room
 app.post('/rooms/request/:code', authMiddleware, async (req, res) => {
   try {
     const room = await PrivateRoom.findOne({ inviteCode: req.params.code });
@@ -145,19 +196,16 @@ app.post('/rooms/request/:code', authMiddleware, async (req, res) => {
     if (isPending) return res.json({ status: 'pending' });
     room.pendingRequests.push({ address: req.user.address, username: req.user.username });
     await room.save();
-    // Notify creator via socket
-    io.to(`user:${room.creatorAddress}`).emit('join_request', {
-      roomId: room._id, roomName: room.name,
-      requester: { address: req.user.address, username: req.user.username },
-    });
+    io.to(`user:${room.creatorAddress}`).emit('join_request', { roomId: room._id, roomName: room.name, requester: { address: req.user.address, username: req.user.username } });
+    // Push notification to creator
+    sendPushToUser(room.creatorAddress, { title: 'GenLayer Chat-Box', body: `${req.user.username} wants to join #${room.name}` });
     res.json({ status: 'pending' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Approve or reject a join request (creator only)
 app.post('/rooms/:roomId/respond', authMiddleware, async (req, res) => {
   try {
-    const { requesterAddress, action } = req.body; // action: 'approve' | 'reject'
+    const { requesterAddress, action } = req.body;
     const room = await PrivateRoom.findById(req.params.roomId);
     if (!room) return res.status(404).json({ error: 'Room not found' });
     if (room.creatorAddress !== req.user.address) return res.status(403).json({ error: 'Only creator can approve' });
@@ -169,6 +217,7 @@ app.post('/rooms/:roomId/respond', authMiddleware, async (req, res) => {
       room.members.push({ address: requester.address, username: requester.username });
       await room.save();
       io.to(`user:${requester.address}`).emit('join_approved', { roomId: room._id, roomName: room.name, inviteCode: room.inviteCode });
+      sendPushToUser(requester.address, { title: 'GenLayer Chat-Box', body: `You've been approved to join #${room.name}!` });
     } else {
       await room.save();
       io.to(`user:${requester.address}`).emit('join_rejected', { roomName: room.name });
@@ -177,22 +226,13 @@ app.post('/rooms/:roomId/respond', authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Get my rooms (created + member of)
 app.get('/rooms/my', authMiddleware, async (req, res) => {
   try {
     const rooms = await PrivateRoom.find({ 'members.address': req.user.address });
-    res.json(rooms.map(r => ({
-      id: r._id, name: r.name, description: r.description,
-      inviteCode: r.inviteCode,
-      isCreator: r.creatorAddress === req.user.address,
-      memberCount: r.members.length,
-      pendingCount: r.creatorAddress === req.user.address ? r.pendingRequests.length : 0,
-      pendingRequests: r.creatorAddress === req.user.address ? r.pendingRequests : [],
-    })));
+    res.json(rooms.map(r => ({ id: r._id, name: r.name, description: r.description, inviteCode: r.inviteCode, isCreator: r.creatorAddress === req.user.address, memberCount: r.members.length, pendingCount: r.creatorAddress === req.user.address ? r.pendingRequests.length : 0, pendingRequests: r.creatorAddress === req.user.address ? r.pendingRequests : [] })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Delete a room (creator only)
 app.delete('/rooms/:roomId', authMiddleware, async (req, res) => {
   try {
     const room = await PrivateRoom.findById(req.params.roomId);
@@ -205,7 +245,21 @@ app.delete('/rooms/:roomId', authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Get messages
+// ─── Message Delete ───────────────────────────────────────────────────────────
+app.delete('/messages/:messageId', authMiddleware, async (req, res) => {
+  try {
+    const msg = await Message.findById(req.params.messageId);
+    if (!msg) return res.status(404).json({ error: 'Message not found' });
+    if (msg.address !== req.user.address) return res.status(403).json({ error: 'Can only delete your own messages' });
+    msg.deleted = true;
+    msg.text = 'This message was deleted';
+    msg.fileUrl = null;
+    await msg.save();
+    io.to(msg.room).emit('message_deleted', { messageId: msg._id, room: msg.room });
+    res.json({ status: 'deleted' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.get('/messages/:room', authMiddleware, async (req, res) => {
   try {
     const messages = await Message.find({ room: req.params.room }).sort({ ts: 1 }).limit(50);
@@ -213,9 +267,18 @@ app.get('/messages/:room', authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get('/health', (_, res) => res.json({ status: 'ok' }));
+app.get('/health', (_, res) => res.json({ status: 'ok', app: 'GenLayer Chat-Box' }));
 
-// ─── Socket.IO Auth ───────────────────────────────────────────────────────────
+// ─── Push helper ──────────────────────────────────────────────────────────────
+async function sendPushToUser(address, payload) {
+  try {
+    const user = await User.findOne({ address });
+    if (!user?.pushSubscription) return;
+    await webpush.sendNotification(user.pushSubscription, JSON.stringify(payload));
+  } catch {}
+}
+
+// ─── Socket.IO ────────────────────────────────────────────────────────────────
 io.use((socket, next) => {
   const token = socket.handshake.auth.token;
   if (!token) return next(new Error('Authentication required'));
@@ -229,31 +292,19 @@ const ROOM_DESCS = { general: 'Open discussion', research: 'AI-assisted research
 
 io.on('connection', (socket) => {
   const { username, address } = socket.user;
-  // Join personal notification channel
   socket.join(`user:${address}`);
 
   socket.on('join_room', async ({ room }) => {
     const isPublic = PUBLIC_ROOMS.includes(room);
     const isPrivate = room.startsWith('private:');
-
     if (!isPublic && !isPrivate) return;
-
-    // Check private room access
     if (isPrivate) {
       const roomId = room.replace('private:', '');
       const privateRoom = await PrivateRoom.findById(roomId);
-      if (!privateRoom) return socket.emit('error', { message: 'Room not found' });
-      const isMember = privateRoom.members.some(m => m.address === address);
-      if (!isMember) return socket.emit('error', { message: 'Access denied' });
+      if (!privateRoom?.members.some(m => m.address === address)) return socket.emit('error', { message: 'Access denied' });
     }
-
     const prev = connectedUsers[socket.id];
-    if (prev?.room) {
-      socket.leave(prev.room);
-      io.to(prev.room).emit('user_left', { username, room: prev.room });
-      broadcastUserList(prev.room);
-    }
-
+    if (prev?.room) { socket.leave(prev.room); io.to(prev.room).emit('user_left', { username, room: prev.room }); broadcastUserList(prev.room); }
     connectedUsers[socket.id] = { username, address, room };
     socket.join(room);
     const messages = await Message.find({ room }).sort({ ts: 1 }).limit(50);
@@ -262,37 +313,36 @@ io.on('connection', (socket) => {
     broadcastUserList(room);
   });
 
-  socket.on('send_message', async ({ room, text }) => {
+  socket.on('send_message', async ({ room, text, fileUrl, fileName, fileType }) => {
     const isPublic = PUBLIC_ROOMS.includes(room);
     const isPrivate = room.startsWith('private:');
     if (!isPublic && !isPrivate) return;
-    if (!text?.trim()) return;
-
+    if (!text?.trim() && !fileUrl) return;
     if (isPrivate) {
-      const roomId = room.replace('private:', '');
-      const privateRoom = await PrivateRoom.findById(roomId);
+      const privateRoom = await PrivateRoom.findById(room.replace('private:', ''));
       if (!privateRoom?.members.some(m => m.address === address)) return;
     }
-
-    const msg = await Message.create({ room, username, address, text: text.trim(), type: 'user' });
+    const msg = await Message.create({ room, username, address, text: text?.trim() || '', type: 'user', fileUrl: fileUrl || null, fileName: fileName || null, fileType: fileType || null });
     io.to(room).emit('new_message', { room, message: msg });
 
-    const aiTrigger = /^@(ai|genlayer)\s+/i.test(text.trim());
-    const alwaysAI = process.env.AI_ALWAYS === 'true';
+    // Push notifications to others in room
+    const roomUsers = Object.values(connectedUsers).filter(u => u.room === room && u.address !== address);
+    const offlineCheck = await User.find({ address: { $nin: roomUsers.map(u => u.address).concat([address]) } });
+    for (const u of offlineCheck) {
+      sendPushToUser(u.address, { title: `#${room}`, body: `${username}: ${text?.slice(0, 60) || '📎 File'}` });
+    }
 
-    if (aiTrigger || alwaysAI) {
+    const aiTrigger = /^@(ai|genlayer)\s+/i.test(text?.trim() || '');
+    const alwaysAI = process.env.AI_ALWAYS === 'true';
+    if ((aiTrigger || alwaysAI) && text?.trim()) {
       io.to(room).emit('ai_typing', { room, typing: true });
       try {
-        const history = await Message.find({ room }).sort({ ts: -1 }).limit(8);
+        const history = await Message.find({ room, deleted: false }).sort({ ts: -1 }).limit(8);
         const cleanText = text.replace(/^@(ai|genlayer)\s+/i, '');
-        const roomDesc = ROOM_DESCS[room] || 'Private collaboration room';
         const response = await anthropic.messages.create({
           model: 'claude-sonnet-4-20250514', max_tokens: 1000,
-          system: `You are GenLayer AI in "${room}" (${roomDesc}). Help the team build a GenLayer-powered app. Be concise and technical. Under 150 words.`,
-          messages: [
-            ...history.reverse().map(m => ({ role: m.type === 'ai' ? 'assistant' : 'user', content: `${m.type !== 'ai' ? m.username + ': ' : ''}${m.text}` })),
-            { role: 'user', content: `${username}: ${cleanText}` },
-          ],
+          system: `You are GenLayer Chat-Box AI in "${room}" (${ROOM_DESCS[room] || 'Private room'}). Be concise and technical. Under 150 words.`,
+          messages: [...history.reverse().map(m => ({ role: m.type === 'ai' ? 'assistant' : 'user', content: `${m.type !== 'ai' ? m.username + ': ' : ''}${m.text}` })), { role: 'user', content: `${username}: ${cleanText}` }],
         });
         const aiText = response.content.map(b => b.text || '').join('');
         const aiMsg = await Message.create({ room, username: 'GenLayer AI', text: aiText, type: 'ai' });
@@ -306,11 +356,7 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     const user = connectedUsers[socket.id];
-    if (user) {
-      io.to(user.room).emit('user_left', { username, room: user.room });
-      broadcastUserList(user.room);
-      delete connectedUsers[socket.id];
-    }
+    if (user) { io.to(user.room).emit('user_left', { username, room: user.room }); broadcastUserList(user.room); delete connectedUsers[socket.id]; }
   });
 });
 
@@ -320,4 +366,4 @@ function broadcastUserList(room) {
 }
 
 const PORT = process.env.PORT || 4000;
-server.listen(PORT, () => console.log(`✅ GenLayer server running on port ${PORT}`));
+server.listen(PORT, () => console.log(`✅ GenLayer Chat-Box server running on port ${PORT}`));

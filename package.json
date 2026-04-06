@@ -1,7 +1,7 @@
 {
-  "name": "genlayer-backend",
-  "version": "2.0.0",
-  "description": "GenLayer backend with Socket.IO, MongoDB, and Web3 wallet auth",
+  "name": "genlayer-chatbox",
+  "version": "3.0.0",
+  "description": "GenLayer Chat-Box — Web3 AI collaboration platform",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -9,13 +9,15 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.20.0",
+    "@supabase/supabase-js": "^2.39.0",
     "cors": "^2.8.5",
-    "dotenv": "^17.4.0",
     "ethers": "^6.9.0",
     "express": "^4.18.2",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.1.0",
-    "socket.io": "^4.7.2"
+    "multer": "^1.4.5-lts.1",
+    "socket.io": "^4.7.2",
+    "web-push": "^3.6.7"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
