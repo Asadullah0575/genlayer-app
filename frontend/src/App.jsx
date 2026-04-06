@@ -479,7 +479,7 @@ export default function App() {
   const activePrivateRoom = isPrivateActive ? privateRooms.find(r => `private:${r.id}` === activeRoom) : null;
 
   return (
-    <div style={{ display: 'flex', height: '100vh', background: '#080c14', color: '#e2e8f0', fontFamily: "'DM Sans',sans-serif", position: 'relative' }}>
+    <div style={{ display: 'flex', height: '100vh', background: '#080c14', color: '#e2e8f0', fontFamily: "'DM Sans',sans-serif" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500&display=swap');
         *{box-sizing:border-box;margin:0;padding:0}
@@ -487,11 +487,6 @@ export default function App() {
         ::-webkit-scrollbar-thumb{background:#1e2d45;border-radius:4px}
         @keyframes fadeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
         @keyframes pulse{0%,80%,100%{transform:scale(0.6);opacity:0.4}40%{transform:scale(1);opacity:1}}
-        @media(max-width:640px){
-          .sidebar{position:fixed!important;left:0;top:0;height:100vh;z-index:50;transform:translateX(-100%);transition:transform 0.25s ease}
-          .sidebar.open{transform:translateX(0)}
-          .sidebar-overlay{display:block!important}
-        }
       `}</style>
 
       {/* Mobile overlay */}
@@ -601,17 +596,16 @@ export default function App() {
       </div>
 
       {/* Main */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0, marginLeft: 0 }}>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0, width: '100%', marginLeft: 0 }}>
         {/* Header */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '0 16px', height: 52, borderBottom: '1px solid #1a2d4a', background: '#0a0f1a', flexShrink: 0 }}>
-          <button onClick={() => setSidebarOpen(v => !v)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#4a5568', fontSize: 18, padding: '4px', flexShrink: 0 }}>☰</button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '0 16px', height: 52, borderBottom: '1px solid #1a2d4a', background: '#0a0f1a', flexShrink: 0, zIndex: 10, position: 'relative' }}>
+          <button onClick={() => setSidebarOpen(v => !v)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748b', fontSize: 22, padding: '8px', flexShrink: 0, lineHeight: 1, minWidth: 44, minHeight: 44, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>☰</button>
           <span style={{ fontSize: 13 }}>{isPrivateActive ? '🔒' : '⬡'}</span>
           <span style={{ fontFamily: "'Space Mono',monospace", fontSize: 13, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>#{activeRoomInfo?.name || 'unknown'}</span>
-          <span style={{ fontSize: 12, color: '#4a5568', display: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} className="room-desc">{activeRoomInfo?.desc || activeRoomInfo?.description}</span>
           <div style={{ flex: 1 }}/>
           {isPrivateActive && activePrivateRoom?.isCreator && (
             <>
-              <button onClick={() => setShowInviteModal(activePrivateRoom)} style={{ background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.2)', borderRadius: 20, padding: '4px 10px', fontSize: 11, color: '#60a5fa', cursor: 'pointer', fontFamily: "'Space Mono',monospace", whiteSpace: 'nowrap' }}>🔗 INVITE</button>
+              <button onClick={() => setShowInviteModal(activePrivateRoom)} style={{ background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.2)', borderRadius: 20, padding: '4px 10px', fontSize: 11, color: '#60a5fa', cursor: 'pointer', fontFamily: "'Space Mono',monospace", whiteSpace: 'nowrap' }}>🔗</button>
               {activePrivateRoom?.pendingCount > 0 && <button onClick={() => setShowRequestsModal(activePrivateRoom)} style={{ background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)', borderRadius: 20, padding: '4px 10px', fontSize: 11, color: '#fbbf24', cursor: 'pointer', whiteSpace: 'nowrap' }}>👥 {activePrivateRoom.pendingCount}</button>}
             </>
           )}
@@ -649,17 +643,14 @@ export default function App() {
         </div>
 
         {/* Input */}
-        <div style={{ padding: '10px 16px 14px', background: '#0a0f1a', borderTop: '1px solid #1a2d4a', flexShrink: 0 }}>
+        <div style={{ padding: '10px 16px 14px', background: '#0a0f1a', borderTop: '1px solid #1a2d4a', flexShrink: 0, position: 'relative', zIndex: 10 }}>
           <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', background: '#111827', border: '1px solid #1e2d45', borderRadius: 12, padding: '8px 12px' }}>
-            <button onClick={() => fileInputRef.current?.click()} disabled={uploading} title="Attach file" style={{ background: 'none', border: 'none', cursor: uploading ? 'default' : 'pointer', color: uploading ? '#2d3748' : '#4a5568', fontSize: 18, padding: '2px', flexShrink: 0, lineHeight: 1 }}>
+            <button onClick={() => fileInputRef.current?.click()} disabled={uploading} style={{ background: 'none', border: 'none', cursor: uploading ? 'default' : 'pointer', color: uploading ? '#2d3748' : '#4a5568', fontSize: 20, flexShrink: 0, lineHeight: 1, minWidth: 36, minHeight: 36, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               {uploading ? '⏳' : '📎'}
             </button>
             <input ref={fileInputRef} type="file" accept="image/*,.pdf,.txt,.zip" style={{ display: 'none' }} onChange={e => { handleFileUpload(e.target.files[0]); e.target.value = ''; }} />
-            <textarea value={input} onChange={handleTyping} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }}} placeholder={`Message #${activeRoomInfo?.name}… (@ai for AI)`} rows={1} style={{ flex: 1, background: 'none', border: 'none', outline: 'none', color: '#e2e8f0', fontSize: 14, resize: 'none', fontFamily: "'DM Sans',sans-serif", lineHeight: 1.5, maxHeight: 120, overflowY: 'auto', minHeight: 22 }} onInput={e => { e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px'; }} />
-            <button onClick={sendMessage} disabled={!input.trim() || !connected} style={{ background: input.trim() && connected ? '#3b82f6' : '#1e2d45', border: 'none', borderRadius: 8, cursor: input.trim() && connected ? 'pointer' : 'default', width: 32, height: 32, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 14, flexShrink: 0 }}>↑</button>
-          </div>
-          <div style={{ marginTop: 6, fontSize: 10, color: '#1e2d45', textAlign: 'center', fontFamily: "'Space Mono',monospace" }}>
-            Enter to send · 📎 attach files · @ai for AI
+            <textarea value={input} onChange={handleTyping} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }}} placeholder={`Message #${activeRoomInfo?.name}…`} rows={1} style={{ flex: 1, background: 'none', border: 'none', outline: 'none', color: '#e2e8f0', fontSize: 16, resize: 'none', fontFamily: "'DM Sans',sans-serif", lineHeight: 1.5, maxHeight: 120, overflowY: 'auto', minHeight: 24, WebkitAppearance: 'none' }} onInput={e => { e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px'; }} />
+            <button onClick={sendMessage} disabled={!input.trim() || !connected} style={{ background: input.trim() && connected ? '#3b82f6' : '#1e2d45', border: 'none', borderRadius: 8, cursor: input.trim() && connected ? 'pointer' : 'default', width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 16, flexShrink: 0 }}>↑</button>
           </div>
         </div>
       </div>
