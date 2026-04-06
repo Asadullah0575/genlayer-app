@@ -511,17 +511,17 @@ export default function App() {
       </div>
 
       {/* Sidebar */}
-      <div style={{ width: 230, background: '#0d1420', borderRight: '1px solid #1a2d4a', display: 'flex', flexDirection: 'column', flexShrink: 0, position: window.innerWidth <= 640 ? 'fixed' : 'relative', left: 0, top: 0, height: '100vh', zIndex: 50, transform: window.innerWidth <= 640 && !sidebarOpen ? 'translateX(-100%)' : 'translateX(0)', transition: 'transform 0.25s ease' }} style={{ width: 230, background: '#0d1420', borderRight: '1px solid #1a2d4a', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
-        <div style={{ padding: '16px 16px 12px', borderBottom: '1px solid #1a2d4a' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <div style={{ width: 28, height: 28, background: '#3b82f6', borderRadius: 7, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14 }}>⬡</div>
-            <span style={{ fontFamily: "'Space Mono',monospace", fontWeight: 700, fontSize: 12, letterSpacing: '0.02em' }}>GENLAYER CHAT-BOX</span>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8 }}>
-            <div style={{ width: 6, height: 6, borderRadius: '50%', background: connected ? '#10b981' : '#ef4444' }}/>
-            <span style={{ fontSize: 10, color: '#4a5568', fontFamily: "'Space Mono',monospace" }}>{connected ? 'connected' : 'reconnecting…'}</span>
-          </div>
-        </div>
+<div style={{ width: 230, background: '#0d1420', borderRight: '1px solid #1a2d4a', display: 'flex', flexDirection: 'column', flexShrink: 0, position: 'fixed', left: 0, top: 0, height: '100vh', zIndex: 50, transform: sidebarOpen ? 'translateX(0)' : 'translateX(-100%)', transition: 'transform 0.25s ease' }}>
+  <div style={{ padding: '16px 16px 12px', borderBottom: '1px solid #1a2d4a' }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <div style={{ width: 28, height: 28, background: '#3b82f6', borderRadius: 7, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14 }}>⬡</div>
+      <span style={{ fontFamily: "'Space Mono',monospace", fontWeight: 700, fontSize: 12, letterSpacing: '0.02em' }}>GENLAYER CHAT-BOX</span>
+    </div>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8 }}>
+      <div style={{ width: 6, height: 6, borderRadius: '50%', background: connected ? '#10b981' : '#ef4444' }}/>
+      <span style={{ fontSize: 10, color: '#4a5568', fontFamily: "'Space Mono',monospace" }}>{connected ? 'connected' : 'reconnecting…'}</span>
+    </div>
+  </div>
 
         {/* Search */}
         <div style={{ padding: '10px 12px', borderBottom: '1px solid #1a2d4a', position: 'relative' }}>
@@ -601,7 +601,7 @@ export default function App() {
       </div>
 
       {/* Main */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0, marginLeft: 0 }}>
         {/* Header */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '0 16px', height: 52, borderBottom: '1px solid #1a2d4a', background: '#0a0f1a', flexShrink: 0 }}>
           <button onClick={() => setSidebarOpen(v => !v)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#4a5568', fontSize: 18, padding: '4px', flexShrink: 0 }}>☰</button>
