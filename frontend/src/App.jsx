@@ -495,8 +495,9 @@ export default function App() {
       `}</style>
 
       {/* Mobile overlay */}
-      <div className="sidebar-overlay" onClick={() => setSidebarOpen(false)} style={{ display: 'none', position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 40 }}/>
-
+      {sidebarOpen && (
+  <div onClick={() => setSidebarOpen(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 40 }}/>
+)}
       {/* Notifications */}
       <div style={{ position: 'fixed', top: 16, right: 16, zIndex: 200, display: 'flex', flexDirection: 'column', gap: 8, maxWidth: 300 }}>
         {notifications.slice(-3).map(n => (
@@ -510,7 +511,7 @@ export default function App() {
       </div>
 
       {/* Sidebar */}
-      <div className={`sidebar${sidebarOpen ? ' open' : ''}`} style={{ width: 230, background: '#0d1420', borderRight: '1px solid #1a2d4a', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
+      <div style={{ width: 230, background: '#0d1420', borderRight: '1px solid #1a2d4a', display: 'flex', flexDirection: 'column', flexShrink: 0, position: window.innerWidth <= 640 ? 'fixed' : 'relative', left: 0, top: 0, height: '100vh', zIndex: 50, transform: window.innerWidth <= 640 && !sidebarOpen ? 'translateX(-100%)' : 'translateX(0)', transition: 'transform 0.25s ease' }} style={{ width: 230, background: '#0d1420', borderRight: '1px solid #1a2d4a', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
         <div style={{ padding: '16px 16px 12px', borderBottom: '1px solid #1a2d4a' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <div style={{ width: 28, height: 28, background: '#3b82f6', borderRadius: 7, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14 }}>⬡</div>
