@@ -350,7 +350,7 @@ function WalletLogin({ onAuth }) {
             </p>
 
             {/* Wallet buttons */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 20 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 20, maxHeight: 280, overflowY: 'auto', paddingRight: 4 }}>
               {wallets.length === 0 && (
                 <div style={{ textAlign: 'center', padding: '24px 0', color: '#2d3748' }}>
                   <div style={{ fontSize: 11, fontFamily: "'Space Mono',monospace", marginBottom: 12 }}>NO WALLETS FOUND</div>
