@@ -434,7 +434,7 @@ function WalletLogin({ onAuth }) {
     </div>
   );
 }
-}
+
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 export default function App() {
