@@ -11,7 +11,7 @@ const crypto = require('crypto');
 const multer = require('multer');
 const { createClient } = require('@supabase/supabase-js');
 const webpush = require('web-push');
-const { Ollama } = require('ollama');
+const Groq = require('groq-sdk');
 
 const app = express();
 const server = http.createServer(app);
@@ -23,7 +23,7 @@ const io = new Server(server, {
 app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:5173' }));
 app.use(express.json());
 
-const ollama = new Ollama({ host: 'https://ollama.com', headers: { Authorization: `Bearer ${process.env.OLLAMA_API_KEY}` } });
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 // ─── Supabase ─────────────────────────────────────────────────────────────────
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
@@ -339,16 +339,15 @@ io.on('connection', (socket) => {
       try {
         const history = await Message.find({ room, deleted: false }).sort({ ts: -1 }).limit(8);
         const cleanText = text.replace(/^@(ai|genlayer)\s+/i, '');
-        const response = await ollama.chat({
-          model: 'gpt-oss:120b-cloud',
+        const response = await groq.chat.completions.create({
+          model: 'llama3-70b-8192',
           messages: [
             { role: 'system', content: `You are GenLayer Chat-Box AI in "${room}" (${ROOM_DESCS[room] || 'Private room'}). Be concise and technical. Under 150 words.` },
             ...history.reverse().map(m => ({ role: m.type === 'ai' ? 'assistant' : 'user', content: `${m.type !== 'ai' ? m.username + ': ' : ''}${m.text}` })),
             { role: 'user', content: `${username}: ${cleanText}` },
           ],
-          stream: false,
         });
-        const aiText = response.message.content;
+        const aiText = response.choices[0].message.content;
         const aiMsg = await Message.create({ room, username: 'GenLayer AI', text: aiText, type: 'ai' });
         io.to(room).emit('new_message', { room, message: aiMsg });
       } catch (err) { console.error('[AI Error]', err.message); }
