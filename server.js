@@ -11,7 +11,7 @@ const crypto = require('crypto');
 const multer = require('multer');
 const { createClient } = require('@supabase/supabase-js');
 const webpush = require('web-push');
-const Anthropic = require('@anthropic-ai/sdk');
+const { Ollama } = require('ollama');
 
 const app = express();
 const server = http.createServer(app);
@@ -23,7 +23,7 @@ const io = new Server(server, {
 app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:5173' }));
 app.use(express.json());
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const ollama = new Ollama({ host: 'https://ollama.com', headers: { Authorization: `Bearer ${process.env.OLLAMA_API_KEY}` } });
 
 // ─── Supabase ─────────────────────────────────────────────────────────────────
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
@@ -339,12 +339,16 @@ io.on('connection', (socket) => {
       try {
         const history = await Message.find({ room, deleted: false }).sort({ ts: -1 }).limit(8);
         const cleanText = text.replace(/^@(ai|genlayer)\s+/i, '');
-        const response = await anthropic.messages.create({
-          model: 'claude-sonnet-4-20250514', max_tokens: 1000,
-          system: `You are GenLayer Chat-Box AI in "${room}" (${ROOM_DESCS[room] || 'Private room'}). Be concise and technical. Under 150 words.`,
-          messages: [...history.reverse().map(m => ({ role: m.type === 'ai' ? 'assistant' : 'user', content: `${m.type !== 'ai' ? m.username + ': ' : ''}${m.text}` })), { role: 'user', content: `${username}: ${cleanText}` }],
+        const response = await ollama.chat({
+          model: 'gpt-oss:120b-cloud',
+          messages: [
+            { role: 'system', content: `You are GenLayer Chat-Box AI in "${room}" (${ROOM_DESCS[room] || 'Private room'}). Be concise and technical. Under 150 words.` },
+            ...history.reverse().map(m => ({ role: m.type === 'ai' ? 'assistant' : 'user', content: `${m.type !== 'ai' ? m.username + ': ' : ''}${m.text}` })),
+            { role: 'user', content: `${username}: ${cleanText}` },
+          ],
+          stream: false,
         });
-        const aiText = response.content.map(b => b.text || '').join('');
+        const aiText = response.message.content;
         const aiMsg = await Message.create({ room, username: 'GenLayer AI', text: aiText, type: 'ai' });
         io.to(room).emit('new_message', { room, message: aiMsg });
       } catch (err) { console.error('[AI Error]', err.message); }
