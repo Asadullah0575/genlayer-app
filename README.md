@@ -39,6 +39,43 @@ Open http://localhost:3000 in two browser tabs to test multi-user.
 
 ---
 
+## ⬡ GenLayer Intelligent Contract Integration
+
+This project implements a fully working **GenLayer Intelligent Contract** that acts as an **On-Chain Bounty Adjudicator**. Users can post tasks with specific completion rules (such as writing a valid sorting function), workers can submit text deliverables, and validators reach an LLM consensus on-chain to evaluate the solution and award completion status.
+
+### 1. Prerequisite: Install GenLayer CLI
+Ensure you have Python 3.12+ and Node.js 18+ installed on your system.
+```bash
+npm install -g genlayer
+```
+
+### 2. Initialize and Start the Localnet Simulator
+```bash
+genlayer init
+genlayer up
+```
+This starts the local GenLayer node and simulator. You can configure your MetaMask wallet to connect to it:
+*   **Network Name**: GenLayer Localnet
+*   **RPC URL**: `http://localhost:4000/api`
+*   **Chain ID**: `61999`
+*   **Currency Symbol**: `GEN`
+
+### 3. Run Contract Unit Tests
+The smart contract includes unit tests that mock the LLM validator consensus locally using `genlayer-test`.
+```bash
+pip install genlayer-test
+pytest tests/ -v
+```
+
+### 4. Deploy the Contract
+Deploy the Intelligent Contract to your running localnet simulator:
+```bash
+genlayer deploy contracts/bounty_board.py
+```
+This will print your contract's address (e.g. `0x...`). Copy this address, open the frontend, click on the **Bounty Board** tab, paste it into the **Contract Address** field, and click **Refresh**.
+
+---
+
 ## Socket.IO Events
 
 ### Client → Server

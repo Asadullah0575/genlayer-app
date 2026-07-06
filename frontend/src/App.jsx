@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { io } from 'socket.io-client';
+import { createClient as createGenLayerClient } from 'genlayer-js';
+import { localnet as genlayerLocalnet } from 'genlayer-js/chains';
 
 const BACKEND_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:4000';
 const APP_NAME = 'GenLayer Chat-Box';
@@ -256,7 +258,12 @@ function WalletLogin({ onAuth }) {
       const accounts = await wallet.provider.request({ method: 'eth_requestAccounts' });
       const addr = accounts[0]; setAddress(addr);
       const res = await fetch(`${BACKEND_URL}/auth/nonce/${addr}`);
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || `Server error (status ${res.status})`);
+      }
       const data = await res.json();
+      if (data.error) throw new Error(data.error);
       setNonce(data.nonce);
       if (data.isNew) { setStep('username'); }
       else { setUsername(data.username); setStep('signing'); await signAndVerify(wallet.provider, addr, data.nonce, data.username); }
@@ -316,6 +323,392 @@ function WalletLogin({ onAuth }) {
         )}
         {step === 'signing' && <div style={{ textAlign: 'center', padding: '20px 0', color: '#64748b', fontSize: 13 }}><div style={{ fontSize: 32, marginBottom: 12 }}>✍️</div><p>Check your wallet and sign to continue…</p></div>}
       </div>
+    </div>
+  );
+}
+
+// ─── GenLayer Bounty Board View ────────────────────────────────────────────────
+function BountyBoardView({ auth }) {
+  const [contractAddress, setContractAddress] = useState(() => {
+    return localStorage.getItem('gl_bounty_contract') || '0x0000000000000000000000000000000000000000';
+  });
+  const [tasks, setTasks] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [showCreateModal, setShowCreateModal] = useState(false);
+
+  // Form state
+  const [newTitle, setNewTitle] = useState('');
+  const [newDesc, setNewDesc] = useState('');
+  const [newCriteria, setNewCriteria] = useState('');
+  const [submittingTask, setSubmittingTask] = useState(false);
+
+  // Deliverables mapping
+  const [deliverables, setDeliverables] = useState({});
+  const [submittingSolution, setSubmittingSolution] = useState({});
+  const [evaluating, setEvaluating] = useState({});
+
+  const saveContractAddress = (addr) => {
+    setContractAddress(addr);
+    localStorage.setItem('gl_bounty_contract', addr);
+  };
+
+  const loadTasks = useCallback(async () => {
+    if (!contractAddress || contractAddress === '0x0000000000000000000000000000000000000000') {
+      setTasks([]);
+      return;
+    }
+    setLoading(true);
+    setError('');
+    try {
+      const client = createGenLayerClient({ chain: genlayerLocalnet });
+      const count = await client.readContract({
+        address: contractAddress,
+        functionName: 'get_task_count',
+        args: [],
+      });
+      
+      const loadedTasks = [];
+      for (let i = 0n; i < count; i++) {
+        const t = await client.readContract({
+          address: contractAddress,
+          functionName: 'get_task',
+          args: [i],
+        });
+        
+        if (Array.isArray(t)) {
+          loadedTasks.push({
+            id: Number(t[0]),
+            creator: t[1],
+            title: t[2],
+            description: t[3],
+            criteria: t[4],
+            deliverable: t[5],
+            candidate: t[6],
+            status: t[7],
+            evaluation_result: t[8]
+          });
+        } else {
+          loadedTasks.push(t);
+        }
+      }
+      setTasks(loadedTasks.reverse()); // Show newest first
+    } catch (err) {
+      console.error(err);
+      setError('Failed to fetch tasks from GenLayer. Ensure the contract is deployed and RPC is running.');
+    }
+    setLoading(false);
+  }, [contractAddress]);
+
+  useEffect(() => {
+    loadTasks();
+  }, [loadTasks]);
+
+  const handleCreateTask = async () => {
+    if (!newTitle.trim() || !newDesc.trim() || !newCriteria.trim()) return;
+    setSubmittingTask(true);
+    setError('');
+    try {
+      if (!window.ethereum) throw new Error('MetaMask or other browser wallet not detected');
+      
+      const client = createGenLayerClient({
+        chain: genlayerLocalnet,
+        account: auth.address,
+        provider: window.ethereum,
+      });
+
+      const txHash = await client.writeContract({
+        address: contractAddress,
+        functionName: 'create_task',
+        args: [newTitle.trim(), newDesc.trim(), newCriteria.trim()],
+      });
+
+      await client.waitForTransactionReceipt({ hash: txHash });
+      setShowCreateModal(false);
+      setNewTitle('');
+      setNewDesc('');
+      setNewCriteria('');
+      loadTasks();
+    } catch (err) {
+      setError(err.message || 'Failed to create task on-chain');
+    }
+    setSubmittingTask(false);
+  };
+
+  const handleSubmitSolution = async (taskId) => {
+    const solution = deliverables[taskId];
+    if (!solution || !solution.trim()) return;
+    setSubmittingSolution(prev => ({ ...prev, [taskId]: true }));
+    try {
+      if (!window.ethereum) throw new Error('MetaMask not detected');
+      
+      const client = createGenLayerClient({
+        chain: genlayerLocalnet,
+        account: auth.address,
+        provider: window.ethereum,
+      });
+
+      const txHash = await client.writeContract({
+        address: contractAddress,
+        functionName: 'submit_solution',
+        args: [BigInt(taskId), solution.trim()],
+      });
+
+      await client.waitForTransactionReceipt({ hash: txHash });
+      setDeliverables(prev => ({ ...prev, [taskId]: '' }));
+      loadTasks();
+    } catch (err) {
+      alert(err.message || 'Failed to submit solution');
+    }
+    setSubmittingSolution(prev => ({ ...prev, [taskId]: false }));
+  };
+
+  const handleEvaluate = async (taskId) => {
+    setEvaluating(prev => ({ ...prev, [taskId]: true }));
+    try {
+      if (!window.ethereum) throw new Error('MetaMask not detected');
+
+      const client = createGenLayerClient({
+        chain: genlayerLocalnet,
+        account: auth.address,
+        provider: window.ethereum,
+      });
+
+      const txHash = await client.writeContract({
+        address: contractAddress,
+        functionName: 'evaluate_submission',
+        args: [BigInt(taskId)],
+      });
+
+      await client.waitForTransactionReceipt({ hash: txHash });
+      loadTasks();
+    } catch (err) {
+      alert(err.message || 'Failed to run evaluation');
+    }
+    setEvaluating(prev => ({ ...prev, [taskId]: false }));
+  };
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflowY: 'auto', padding: '20px', background: '#080c14' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, gap: 16, flexWrap: 'wrap' }}>
+        <div>
+          <h1 style={{ fontSize: 18, fontWeight: 600, color: '#e2e8f0', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ color: '#3b82f6' }}>⬡</span> GenLayer Bounty Board
+          </h1>
+          <p style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>
+            On-chain task creation, submission, and validation using LLM-based validator consensus.
+          </p>
+        </div>
+        <button onClick={() => setShowCreateModal(true)} style={{ padding: '8px 14px', borderRadius: 8, background: '#3b82f6', border: 'none', color: '#fff', fontSize: 12, fontWeight: 500, cursor: 'pointer', fontFamily: "'Space Mono',monospace" }}>
+          + CREATE BOUNTY
+        </button>
+      </div>
+
+      {/* Settings Panel */}
+      <div style={{ background: '#0d1420', border: '1px solid #1a2d4a', borderRadius: 12, padding: '16px 20px', marginBottom: 24 }}>
+        <h2 style={{ fontSize: 11, fontFamily: "'Space Mono',monospace", color: '#e2e8f0', marginBottom: 8, letterSpacing: '0.05em' }}>GENLAYER CONTRACT SETTINGS</h2>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: 260 }}>
+            <label style={{ fontSize: 10, color: '#4a5568', display: 'block', marginBottom: 4 }}>DEPLOYED CONTRACT ADDRESS</label>
+            <input 
+              type="text" 
+              value={contractAddress} 
+              onChange={e => saveContractAddress(e.target.value)} 
+              placeholder="0x..." 
+              style={{ width: '100%', padding: '9px 12px', borderRadius: 8, background: '#111827', border: '1px solid #1e2d45', color: '#60a5fa', fontFamily: "'Space Mono',monospace", fontSize: 13, outline: 'none' }}
+            />
+          </div>
+          <button onClick={loadTasks} style={{ alignSelf: 'flex-end', padding: '9px 16px', borderRadius: 8, background: '#111827', border: '1px solid #1e2d45', color: '#94a3b8', fontSize: 13, cursor: 'pointer', fontFamily: "'Space Mono',monospace" }}>
+            REFRESH
+          </button>
+        </div>
+        {(!contractAddress || contractAddress === '0x0000000000000000000000000000000000000000') && (
+          <div style={{ background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)', borderRadius: 8, padding: '10px 14px', marginTop: 12, fontSize: 12, color: '#f59e0b', lineHeight: 1.5 }}>
+            ⚠️ <b>No contract deployed yet?</b> Deploy the Python contract (`contracts/bounty_board.py`) using the GenLayer CLI (`genlayer deploy contracts/bounty_board.py`) and paste the address above to start interacting with it!
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <div style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 8, padding: '12px 16px', marginBottom: 20, fontSize: 13, color: '#fca5a5' }}>
+          {error}
+        </div>
+      )}
+
+      {/* Tasks List */}
+      {loading ? (
+        <div style={{ textAlign: 'center', padding: '40px 0', color: '#64748b', fontSize: 14 }}>
+          Loading tasks from GenLayer...
+        </div>
+      ) : tasks.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: '80px 20px', border: '1px dashed #1a2d4a', borderRadius: 12, color: '#4a5568' }}>
+          <div style={{ fontSize: 32, marginBottom: 12 }}>⬡</div>
+          <div style={{ fontSize: 14, fontWeight: 500 }}>No tasks found on-chain</div>
+          <p style={{ fontSize: 12, marginTop: 6 }}>Create a task above to register the first bounty on GenLayer.</p>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {tasks.map(t => {
+            const statusColors = {
+              'Open': { bg: 'rgba(59,130,246,0.1)', border: 'rgba(59,130,246,0.3)', text: '#3b82f6' },
+              'UnderReview': { bg: 'rgba(245,158,11,0.1)', border: 'rgba(245,158,11,0.3)', text: '#f59e0b' },
+              'Completed': { bg: 'rgba(16,185,129,0.1)', border: 'rgba(16,185,129,0.3)', text: '#10b981' },
+              'Rejected': { bg: 'rgba(239,68,68,0.1)', border: 'rgba(239,68,68,0.3)', text: '#ef4444' }
+            };
+            const colors = statusColors[t.status] || statusColors['Open'];
+
+            return (
+              <div key={t.id} style={{ background: '#0d1420', border: '1px solid #1a2d4a', borderRadius: 12, padding: '20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+                  <div>
+                    <span style={{ fontSize: 11, fontFamily: "'Space Mono',monospace", color: '#4a5568' }}>TASK #{t.id}</span>
+                    <h3 style={{ fontSize: 16, fontWeight: 600, color: '#e2e8f0', marginTop: 2 }}>{t.title}</h3>
+                  </div>
+                  <span style={{ padding: '4px 10px', borderRadius: 20, fontSize: 11, fontWeight: 500, background: colors.bg, border: `1px solid ${colors.border}`, color: colors.text, fontFamily: "'Space Mono',monospace" }}>
+                    {t.status.toUpperCase()}
+                  </span>
+                </div>
+
+                <div style={{ fontSize: 13, color: '#cbd5e1', lineHeight: 1.6 }}>
+                  {t.description}
+                </div>
+
+                {/* Criteria */}
+                <div style={{ background: '#111827', border: '1px solid #1e2d45', borderRadius: 8, padding: '12px 14px' }}>
+                  <div style={{ fontSize: 10, fontFamily: "'Space Mono',monospace", color: '#64748b', marginBottom: 4, letterSpacing: '0.05em' }}>LLM VALIDATION CRITERIA</div>
+                  <div style={{ fontSize: 12, color: '#94a3b8', fontStyle: 'italic', lineHeight: 1.5 }}>
+                    "{t.criteria}"
+                  </div>
+                </div>
+
+                {/* Task metadata */}
+                <div style={{ display: 'flex', gap: 16, fontSize: 11, color: '#4a5568', fontFamily: "'Space Mono',monospace", borderTop: '1px solid #162438', paddingTop: 12 }}>
+                  <div>CREATOR: <span style={{ color: '#64748b' }}>{shortAddress(t.creator)}</span></div>
+                  {t.candidate && t.candidate !== '0x0000000000000000000000000000000000000000' && (
+                    <div>CANDIDATE: <span style={{ color: '#64748b' }}>{shortAddress(t.candidate)}</span></div>
+                  )}
+                </div>
+
+                {/* Submissions or reports depending on status */}
+                {t.status === 'Open' && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, borderTop: '1px dashed #162438', paddingTop: 14 }}>
+                    <label style={{ fontSize: 12, color: '#cbd5e1', fontWeight: 500 }}>Submit Your Deliverable</label>
+                    <textarea 
+                      value={deliverables[t.id] || ''} 
+                      onChange={e => setDeliverables(prev => ({ ...prev, [t.id]: e.target.value }))}
+                      placeholder="Paste your code, output, or text deliverable here..." 
+                      rows={3}
+                      style={{ width: '100%', padding: '10px 12px', borderRadius: 8, background: '#111827', border: '1px solid #1e2d45', color: '#e2e8f0', fontSize: 13, outline: 'none', resize: 'vertical' }}
+                    />
+                    <button 
+                      onClick={() => handleSubmitSolution(t.id)} 
+                      disabled={submittingSolution[t.id] || !deliverables[t.id]?.trim()}
+                      style={{ alignSelf: 'flex-start', padding: '8px 16px', borderRadius: 8, background: deliverables[t.id]?.trim() ? '#3b82f6' : '#1e2d45', border: 'none', color: '#fff', fontSize: 12, cursor: deliverables[t.id]?.trim() ? 'pointer' : 'default', fontFamily: "'Space Mono',monospace" }}
+                    >
+                      {submittingSolution[t.id] ? 'SUBMITTING...' : 'SUBMIT SOLUTION'}
+                    </button>
+                  </div>
+                )}
+
+                {t.status === 'UnderReview' && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12, borderTop: '1px dashed #162438', paddingTop: 14 }}>
+                    <div>
+                      <div style={{ fontSize: 11, fontFamily: "'Space Mono',monospace", color: '#64748b', marginBottom: 4 }}>SUBMITTED DELIVERABLE</div>
+                      <div style={{ background: '#111827', border: '1px solid #1e2d45', borderRadius: 8, padding: '10px 12px', fontSize: 13, color: '#94a3b8', whiteSpace: 'pre-wrap', fontFamily: "'Space Mono',monospace" }}>
+                        {t.deliverable}
+                      </div>
+                    </div>
+                    <button 
+                      onClick={() => handleEvaluate(t.id)} 
+                      disabled={evaluating[t.id]}
+                      style={{ alignSelf: 'flex-start', padding: '10px 20px', borderRadius: 8, background: '#e0f2fe', border: '1px solid #bae6fd', color: '#0369a1', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: "'Space Mono',monospace" }}
+                    >
+                      {evaluating[t.id] ? 'RUNNING LLM CONSENSUS...' : '🚀 RUN GENLAYER LLM EVALUATION'}
+                    </button>
+                  </div>
+                )}
+
+                {(t.status === 'Completed' || t.status === 'Rejected') && t.evaluation_result && (
+                  <div style={{ borderTop: '1px dashed #162438', paddingTop: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {t.status === 'Completed' ? (
+                      <div style={{ fontSize: 12, color: '#10b981', fontWeight: 500 }}>✓ Deliverable approved on-chain.</div>
+                    ) : (
+                      <div style={{ fontSize: 12, color: '#ef4444', fontWeight: 500 }}>✗ Deliverable rejected by validators. Task remains open for new solutions.</div>
+                    )}
+                    <div>
+                      <div style={{ fontSize: 10, fontFamily: "'Space Mono',monospace", color: '#64748b', marginBottom: 4 }}>ON-CHAIN VALIDATOR CONSENSUS REPORT</div>
+                      <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid #1e2d45', borderRadius: 8, padding: '12px 14px', fontSize: 13, color: '#94a3b8', lineHeight: 1.5 }}>
+                        {t.evaluation_result}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Create Task Modal */}
+      {showCreateModal && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100, padding: 16 }}>
+          <div style={{ background: '#0d1420', border: '1px solid #1a2d4a', borderRadius: 16, padding: '28px 32px', width: '100%', maxWidth: 440 }}>
+            <h2 style={{ fontFamily: "'Space Mono',monospace", fontSize: 13, color: '#e2e8f0', marginBottom: 20, letterSpacing: '0.05em' }}>CREATE ON-CHAIN TASK</h2>
+            
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 20 }}>
+              <div>
+                <label style={{ fontSize: 11, color: '#64748b', display: 'block', marginBottom: 4 }}>TASK TITLE</label>
+                <input 
+                  type="text" 
+                  placeholder="e.g. Write Python sorting function..." 
+                  value={newTitle} 
+                  onChange={e => setNewTitle(e.target.value)} 
+                  style={{ width: '100%', padding: '10px 14px', borderRadius: 8, background: '#111827', border: '1px solid #1e2d45', color: '#e2e8f0', fontSize: 13, outline: 'none' }}
+                  autoFocus 
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: 11, color: '#64748b', display: 'block', marginBottom: 4 }}>DESCRIPTION & EXPECTED DELIVERABLE</label>
+                <textarea 
+                  placeholder="Describe the task instructions..." 
+                  value={newDesc} 
+                  onChange={e => setNewDesc(e.target.value)} 
+                  rows={3}
+                  style={{ width: '100%', padding: '10px 14px', borderRadius: 8, background: '#111827', border: '1px solid #1e2d45', color: '#e2e8f0', fontSize: 13, outline: 'none', resize: 'vertical' }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: 11, color: '#64748b', display: 'block', marginBottom: 4 }}>LLM VALIDATION CRITERIA (FOR CONSENSUS)</label>
+                <textarea 
+                  placeholder="Describe the test/validation rules (e.g. must contain a valid sort method, time complexity, etc.)" 
+                  value={newCriteria} 
+                  onChange={e => setNewCriteria(e.target.value)} 
+                  rows={2}
+                  style={{ width: '100%', padding: '10px 14px', borderRadius: 8, background: '#111827', border: '1px solid #1e2d45', color: '#e2e8f0', fontSize: 13, outline: 'none', resize: 'vertical' }}
+                />
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button 
+                onClick={() => setShowCreateModal(false)} 
+                style={{ flex: 1, padding: '10px', borderRadius: 8, background: 'transparent', border: '1px solid #1e2d45', color: '#64748b', fontSize: 13, cursor: 'pointer' }}
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={handleCreateTask} 
+                disabled={!newTitle.trim() || !newDesc.trim() || !newCriteria.trim() || submittingTask} 
+                style={{ flex: 1, padding: '10px', borderRadius: 8, background: (newTitle.trim() && newDesc.trim() && newCriteria.trim()) ? '#3b82f6' : '#1e2d45', border: 'none', color: '#fff', fontSize: 13, cursor: (newTitle.trim() && newDesc.trim() && newCriteria.trim()) ? 'pointer' : 'default', fontFamily: "'Space Mono',monospace" }}
+              >
+                {submittingTask ? 'DEPLOYING...' : 'DEPLOY TASK'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -417,7 +810,9 @@ export default function App() {
   const switchRoom = (room) => {
     if (room === activeRoom) return;
     setActiveRoom(room);
-    socketRef.current?.emit('join_room', { room });
+    if (room !== 'bounties') {
+      socketRef.current?.emit('join_room', { room });
+    }
     setSidebarOpen(false); // auto-close sidebar on mobile
   };
 
@@ -471,7 +866,7 @@ export default function App() {
   if (!auth) return <WalletLogin onAuth={setAuth} />;
   if (inviteCode) return <JoinRoomPage inviteCode={inviteCode} auth={auth} onJoined={(room) => { window.history.pushState({}, '', '/'); switchRoom(room); }} />;
 
-  const activeRoomInfo = PUBLIC_ROOMS.find(r => r.id === activeRoom) || privateRooms.find(r => `private:${r.id}` === activeRoom);
+  const activeRoomInfo = activeRoom === 'bounties' ? { name: 'bounty-board', desc: 'On-chain task validation' } : (PUBLIC_ROOMS.find(r => r.id === activeRoom) || privateRooms.find(r => `private:${r.id}` === activeRoom));
   const roomMsgs = messages[activeRoom] || [];
   const typingNow = (typingUsers[activeRoom] || []).filter(u => u !== auth.username);
   const onlineUsers = roomUsers[activeRoom] || [];
@@ -533,6 +928,12 @@ export default function App() {
         </div>
 
         <div style={{ flex: 1, overflowY: 'auto', padding: '10px 8px' }}>
+          <div style={{ fontSize: 10, color: '#4a5568', fontFamily: "'Space Mono',monospace", padding: '0 8px 6px', letterSpacing: '0.1em' }}>GENLAYER</div>
+          <button onClick={() => switchRoom('bounties')} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', borderRadius: 8, border: 'none', cursor: 'pointer', background: activeRoom === 'bounties' ? 'rgba(59,130,246,0.12)' : 'transparent', color: activeRoom === 'bounties' ? '#60a5fa' : '#64748b', marginBottom: 12, textAlign: 'left' }}>
+            <span style={{ fontSize: 10, color: activeRoom === 'bounties' ? '#3b82f6' : '#334155' }}>⬡</span>
+            <span style={{ fontSize: 13, fontWeight: activeRoom === 'bounties' ? 500 : 400, flex: 1 }}>Bounty Board</span>
+          </button>
+
           <div style={{ fontSize: 10, color: '#4a5568', fontFamily: "'Space Mono',monospace", padding: '0 8px 6px', letterSpacing: '0.1em' }}>PUBLIC</div>
           {PUBLIC_ROOMS.map(r => (
             <button key={r.id} onClick={() => switchRoom(r.id)} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', borderRadius: 8, border: 'none', cursor: 'pointer', background: activeRoom === r.id ? 'rgba(59,130,246,0.12)' : 'transparent', color: activeRoom === r.id ? '#60a5fa' : '#64748b', marginBottom: 1, textAlign: 'left' }}>
@@ -615,44 +1016,51 @@ export default function App() {
           </div>
         </div>
 
-        {/* Messages */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
-          {roomMsgs.length === 0 && (
-            <div style={{ textAlign: 'center', padding: '60px 20px', color: '#2d3748' }}>
-              <div style={{ fontSize: 36, marginBottom: 12 }}>{isPrivateActive ? '🔒' : '⬡'}</div>
-              <div style={{ fontFamily: "'Space Mono',monospace", fontSize: 13 }}>#{activeRoomInfo?.name} — start collaborating</div>
-              <div style={{ fontSize: 12, marginTop: 6 }}>Use <code style={{ color: '#3b82f6' }}>@ai</code> to ask GenLayer AI</div>
+        {/* Main Content Area */}
+        {activeRoom === 'bounties' ? (
+          <BountyBoardView auth={auth} />
+        ) : (
+          <>
+            {/* Messages */}
+            <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
+              {roomMsgs.length === 0 && (
+                <div style={{ textAlign: 'center', padding: '60px 20px', color: '#2d3748' }}>
+                  <div style={{ fontSize: 36, marginBottom: 12 }}>{isPrivateActive ? '🔒' : '⬡'}</div>
+                  <div style={{ fontFamily: "'Space Mono',monospace", fontSize: 13 }}>#{activeRoomInfo?.name} — start collaborating</div>
+                  <div style={{ fontSize: 12, marginTop: 6 }}>Use <code style={{ color: '#3b82f6' }}>@ai</code> to ask GenLayer AI</div>
+                </div>
+              )}
+              {roomMsgs.map(m => m.type === 'system' ? (
+                <div key={m._id} style={{ textAlign: 'center', fontSize: 11, color: '#2d3748', padding: '3px 0', fontFamily: "'Space Mono',monospace" }}>{m.text}</div>
+              ) : <Message key={m._id} msg={m} currentAddress={auth.address} onDelete={handleDeleteMessage} />)}
+              {typingNow.length > 0 && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', fontSize: 12, color: '#4a5568' }}>
+                  <div style={{ display: 'flex', gap: 3 }}>{[0,1,2].map(i => <div key={i} style={{ width: 5, height: 5, borderRadius: '50%', background: '#3b82f6', animation: `pulse 1.2s ease-in-out ${i*0.2}s infinite`, opacity: 0.7 }}/>)}</div>
+                  <span>{typingNow.join(', ')} typing…</span>
+                </div>
+              )}
+              {aiTyping[activeRoom] && (
+                <div style={{ display: 'flex', gap: 10, padding: '6px 0', alignItems: 'flex-start' }}>
+                  <div style={{ width: 32, height: 32, borderRadius: 8, flexShrink: 0, background: '#1e3a5f', border: '1.5px solid #3b82f633', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14 }}>⬡</div>
+                  <div style={{ paddingTop: 8, display: 'flex', gap: 3 }}>{[0,1,2].map(i => <div key={i} style={{ width: 5, height: 5, borderRadius: '50%', background: '#3b82f6', animation: `pulse 1.2s ease-in-out ${i*0.2}s infinite`, opacity: 0.7 }}/>)}</div>
+                </div>
+              )}
+              <div ref={messagesEndRef}/>
             </div>
-          )}
-          {roomMsgs.map(m => m.type === 'system' ? (
-            <div key={m._id} style={{ textAlign: 'center', fontSize: 11, color: '#2d3748', padding: '3px 0', fontFamily: "'Space Mono',monospace" }}>{m.text}</div>
-          ) : <Message key={m._id} msg={m} currentAddress={auth.address} onDelete={handleDeleteMessage} />)}
-          {typingNow.length > 0 && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', fontSize: 12, color: '#4a5568' }}>
-              <div style={{ display: 'flex', gap: 3 }}>{[0,1,2].map(i => <div key={i} style={{ width: 5, height: 5, borderRadius: '50%', background: '#3b82f6', animation: `pulse 1.2s ease-in-out ${i*0.2}s infinite`, opacity: 0.7 }}/>)}</div>
-              <span>{typingNow.join(', ')} typing…</span>
-            </div>
-          )}
-          {aiTyping[activeRoom] && (
-            <div style={{ display: 'flex', gap: 10, padding: '6px 0', alignItems: 'flex-start' }}>
-              <div style={{ width: 32, height: 32, borderRadius: 8, flexShrink: 0, background: '#1e3a5f', border: '1.5px solid #3b82f633', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14 }}>⬡</div>
-              <div style={{ paddingTop: 8, display: 'flex', gap: 3 }}>{[0,1,2].map(i => <div key={i} style={{ width: 5, height: 5, borderRadius: '50%', background: '#3b82f6', animation: `pulse 1.2s ease-in-out ${i*0.2}s infinite`, opacity: 0.7 }}/>)}</div>
-            </div>
-          )}
-          <div ref={messagesEndRef}/>
-        </div>
 
-        {/* Input */}
-        <div style={{ padding: '10px 16px 14px', background: '#0a0f1a', borderTop: '1px solid #1a2d4a', flexShrink: 0, position: 'relative', zIndex: 10 }}>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', background: '#111827', border: '1px solid #1e2d45', borderRadius: 12, padding: '8px 12px' }}>
-            <button onClick={() => fileInputRef.current?.click()} disabled={uploading} style={{ background: 'none', border: 'none', cursor: uploading ? 'default' : 'pointer', color: uploading ? '#2d3748' : '#4a5568', fontSize: 20, flexShrink: 0, lineHeight: 1, minWidth: 36, minHeight: 36, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              {uploading ? '⏳' : '📎'}
-            </button>
-            <input ref={fileInputRef} type="file" accept="image/*,.pdf,.txt,.zip" style={{ display: 'none' }} onChange={e => { handleFileUpload(e.target.files[0]); e.target.value = ''; }} />
-            <textarea value={input} onChange={handleTyping} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }}} placeholder={`Message #${activeRoomInfo?.name}…`} rows={1} style={{ flex: 1, background: 'none', border: 'none', outline: 'none', color: '#e2e8f0', fontSize: 16, resize: 'none', fontFamily: "'DM Sans',sans-serif", lineHeight: 1.5, maxHeight: 120, overflowY: 'auto', minHeight: 24, WebkitAppearance: 'none' }} onInput={e => { e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px'; }} />
-            <button onClick={sendMessage} disabled={!input.trim() || !connected} style={{ background: input.trim() && connected ? '#3b82f6' : '#1e2d45', border: 'none', borderRadius: 8, cursor: input.trim() && connected ? 'pointer' : 'default', width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 16, flexShrink: 0 }}>↑</button>
-          </div>
-        </div>
+            {/* Input */}
+            <div style={{ padding: '10px 16px 14px', background: '#0a0f1a', borderTop: '1px solid #1a2d4a', flexShrink: 0, position: 'relative', zIndex: 10 }}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', background: '#111827', border: '1px solid #1e2d45', borderRadius: 12, padding: '8px 12px' }}>
+                <button onClick={() => fileInputRef.current?.click()} disabled={uploading} style={{ background: 'none', border: 'none', cursor: uploading ? 'default' : 'pointer', color: uploading ? '#2d3748' : '#4a5568', fontSize: 20, flexShrink: 0, lineHeight: 1, minWidth: 36, minHeight: 36, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  {uploading ? '⏳' : '📎'}
+                </button>
+                <input ref={fileInputRef} type="file" accept="image/*,.pdf,.txt,.zip" style={{ display: 'none' }} onChange={e => { handleFileUpload(e.target.files[0]); e.target.value = ''; }} />
+                <textarea value={input} onChange={handleTyping} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }}} placeholder={`Message #${activeRoomInfo?.name}…`} rows={1} style={{ flex: 1, background: 'none', border: 'none', outline: 'none', color: '#e2e8f0', fontSize: 16, resize: 'none', fontFamily: "'DM Sans',sans-serif", lineHeight: 1.5, maxHeight: 120, overflowY: 'auto', minHeight: 24, WebkitAppearance: 'none' }} onInput={e => { e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px'; }} />
+                <button onClick={sendMessage} disabled={!input.trim() || !connected} style={{ background: input.trim() && connected ? '#3b82f6' : '#1e2d45', border: 'none', borderRadius: 8, cursor: input.trim() && connected ? 'pointer' : 'default', width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 16, flexShrink: 0 }}>↑</button>
+              </div>
+            </div>
+          </>
+        )}
       </div>
 
       {showCreateModal && <CreateRoomModal token={auth.token} onClose={() => setShowCreateModal(false)} onCreated={room => { setShowCreateModal(false); fetchMyRooms(); setTimeout(() => switchRoom(`private:${room._id}`), 300); }} />}
