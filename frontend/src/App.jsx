@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { io } from 'socket.io-client';
 import { createClient as createGenLayerClient } from 'genlayer-js';
-import { localnet as genlayerLocalnet } from 'genlayer-js/chains';
+import { studionet as genlayerLocalnet } from 'genlayer-js/chains';
 
 const BACKEND_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:4000';
 const APP_NAME = 'GenLayer Chat-Box';
@@ -229,7 +229,6 @@ function WalletLogin({ onAuth }) {
   const [step, setStep] = useState('connect');
   const [wallets, setWallets] = useState([]);
   const [selectedProvider, setSelectedProvider] = useState(null);
-  const [selectedWalletInfo, setSelectedWalletInfo] = useState(null);
   const [address, setAddress] = useState('');
   const [username, setUsername] = useState('');
   const [nonce, setNonce] = useState('');
@@ -254,7 +253,7 @@ function WalletLogin({ onAuth }) {
   }, []);
 
   const connectWallet = async (wallet) => {
-    setError(''); setLoading(true); setSelectedProvider(wallet.provider); setSelectedWalletInfo(wallet.info);
+    setError(''); setLoading(true); setSelectedProvider(wallet.provider);
     try {
       const accounts = await wallet.provider.request({ method: 'eth_requestAccounts' });
       const addr = accounts[0]; setAddress(addr);
@@ -272,7 +271,7 @@ function WalletLogin({ onAuth }) {
     setLoading(false);
   };
 
-  const signAndVerify = async (provider, addr, nonceVal, user, walletInfo = selectedWalletInfo) => {
+  const signAndVerify = async (provider, addr, nonceVal, user) => {
     setLoading(true); setStep('signing');
     try {
       const message = `Welcome to ${APP_NAME}!\n\nSign this message to verify your wallet.\n\nNonce: ${nonceVal}`;
@@ -281,8 +280,7 @@ function WalletLogin({ onAuth }) {
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       localStorage.setItem('gl_token', data.token); localStorage.setItem('gl_username', data.username); localStorage.setItem('gl_address', data.address);
-      if (walletInfo?.rdns) localStorage.setItem('gl_wallet_rdns', walletInfo.rdns);
-      onAuth({ token: data.token, username: data.username, address: data.address }, provider);
+      onAuth({ token: data.token, username: data.username, address: data.address });
     } catch (err) { setError(err.message || 'Signing failed'); setStep('connect'); }
     setLoading(false);
   };
@@ -330,7 +328,7 @@ function WalletLogin({ onAuth }) {
 }
 
 // ─── GenLayer Bounty Board View ────────────────────────────────────────────────
-function BountyBoardView({ auth, providerRef }) {
+function BountyBoardView({ auth }) {
   const [contractAddress, setContractAddress] = useState(() => {
     return localStorage.getItem('gl_bounty_contract') || '0x0000000000000000000000000000000000000000';
   });
@@ -411,13 +409,12 @@ function BountyBoardView({ auth, providerRef }) {
     setSubmittingTask(true);
     setError('');
     try {
-      const activeProvider = providerRef?.current || window.ethereum;
-      if (!activeProvider) throw new Error('No wallet provider available. Please reconnect your wallet.');
+      if (!window.ethereum) throw new Error('MetaMask or other browser wallet not detected');
 
       const client = createGenLayerClient({
         chain: genlayerLocalnet,
         account: auth.address,
-        provider: activeProvider,
+        provider: window.ethereum,
       });
 
       const txHash = await client.writeContract({
@@ -443,13 +440,12 @@ function BountyBoardView({ auth, providerRef }) {
     if (!solution || !solution.trim()) return;
     setSubmittingSolution(prev => ({ ...prev, [taskId]: true }));
     try {
-      const activeProvider = providerRef?.current || window.ethereum;
-      if (!activeProvider) throw new Error('No wallet provider available. Please reconnect your wallet.');
+      if (!window.ethereum) throw new Error('MetaMask not detected');
 
       const client = createGenLayerClient({
         chain: genlayerLocalnet,
         account: auth.address,
-        provider: activeProvider,
+        provider: window.ethereum,
       });
 
       const txHash = await client.writeContract({
@@ -470,13 +466,12 @@ function BountyBoardView({ auth, providerRef }) {
   const handleEvaluate = async (taskId) => {
     setEvaluating(prev => ({ ...prev, [taskId]: true }));
     try {
-      const activeProvider = providerRef?.current || window.ethereum;
-      if (!activeProvider) throw new Error('No wallet provider available. Please reconnect your wallet.');
+      if (!window.ethereum) throw new Error('MetaMask not detected');
 
       const client = createGenLayerClient({
         chain: genlayerLocalnet,
         account: auth.address,
-        provider: activeProvider,
+        provider: window.ethereum,
       });
 
       const txHash = await client.writeContract({
@@ -726,25 +721,6 @@ export default function App() {
     const address = localStorage.getItem('gl_address');
     return token && username ? { token, username, address } : null;
   });
-  const providerRef = useRef(null);
-  const handleAuth = (authData, provider) => { providerRef.current = provider; setAuth(authData); };
-
-  // On reload there's no live provider object in memory (it never survives a refresh),
-  // only the address/token in localStorage. Re-run EIP-6963 discovery and reattach the
-  // provider the user originally signed in with, instead of letting downstream code
-  // fall back to window.ethereum blindly.
-  useEffect(() => {
-    if (providerRef.current) return;
-    const savedRdns = localStorage.getItem('gl_wallet_rdns');
-    if (!savedRdns) return;
-    const handleAnnounce = (event) => {
-      const { info, provider } = event.detail;
-      if (info.rdns === savedRdns) providerRef.current = provider;
-    };
-    window.addEventListener('eip6963:announceProvider', handleAnnounce);
-    window.dispatchEvent(new Event('eip6963:requestProvider'));
-    return () => window.removeEventListener('eip6963:announceProvider', handleAnnounce);
-  }, []);
 
   const inviteCode = window.location.pathname.startsWith('/join/') ? window.location.pathname.split('/join/')[1] : null;
   const [activeRoom, setActiveRoom] = useState('general');
@@ -887,7 +863,7 @@ export default function App() {
     if (activeRoom === `private:${roomId}`) setActiveRoom('general');
   };
 
-  if (!auth) return <WalletLogin onAuth={handleAuth} />;
+  if (!auth) return <WalletLogin onAuth={setAuth} />;
   if (inviteCode) return <JoinRoomPage inviteCode={inviteCode} auth={auth} onJoined={(room) => { window.history.pushState({}, '', '/'); switchRoom(room); }} />;
 
   const activeRoomInfo = activeRoom === 'bounties' ? { name: 'bounty-board', desc: 'On-chain task validation' } : (PUBLIC_ROOMS.find(r => r.id === activeRoom) || privateRooms.find(r => `private:${r.id}` === activeRoom));
@@ -1042,7 +1018,7 @@ export default function App() {
 
         {/* Main Content Area */}
         {activeRoom === 'bounties' ? (
-          <BountyBoardView auth={auth} providerRef={providerRef} />
+          <BountyBoardView auth={auth} />
         ) : (
           <>
             {/* Messages */}
